@@ -48,7 +48,7 @@ exports.register = async (req, res) => {
 
   await EmailVerificationToken.create({
     userId: newUser._id,
-    hashedToken,
+    token: hashedToken,
     expiresAt: Date.now() + 24 * 60 * 60 * 1000 // 24 hrs
   });
 
