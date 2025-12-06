@@ -6,7 +6,6 @@ const { Resend } = require('resend');
 const RefreshToken = require("../models/RefreshToken");
 const User = require("../models/User");
 const EmailVerificationToken = require('../models/EmailVerificationToken');
-const transporter = require('../config/email');
 
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
