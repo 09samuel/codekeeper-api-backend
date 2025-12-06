@@ -31,68 +31,94 @@ mongoose.connect(MONGODB_URI, {
 
 //register
 exports.register = async (req, res) => {
-  console.log("Register request body:", req.body);
-  const { email, password, name } = req.body;
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-  if (!email || !password || !name) return res.status(400).json({ message: 'Missing fields' });
+  try {
+    const { email, password, name } = req.body;
 
-  const existingUser = await User.findOne({ email: email.trim() });
-  if (existingUser) return res.status(409).json({ message: 'A user with that email already exists' });
-
-  const hashedPassword = await bcrypt.hash(password, 10);
-
-  const newUser = new User({ email, name, hashedPassword, isVerified: false });
-  await newUser.save();
-
-
-  const token = crypto.randomBytes(32).toString("hex");
-  const hashedToken = await bcrypt.hash(token, 10);
-
-  await EmailVerificationToken.create({
-    userId: newUser._id,
-    token: hashedToken,
-    expiresAt: Date.now() + 24 * 60 * 60 * 1000 // 24 hrs
-  });
-
-  const verificationLink = `${process.env.SERVER_URL}/api/auth/verify-email?token=${token}`;
-
-  let apiInstance = new brevo.TransactionalEmailsApi();
-  apiInstance.setApiKey(brevo.TransactionalEmailsApiApiKeys.apiKey, BREVO_API_KEY);
-
-  let sendSmtpEmail = new brevo.SendSmtpEmail();
-
-  sendSmtpEmail.sender = { name: 'CodeKeeper', email: 'samuelfernandes009@gmail.com' };
-  sendSmtpEmail.to = [{ email: newUser.email, name: newUser.name }];
-  sendSmtpEmail.subject = 'Verify Your Email';
-  sendSmtpEmail.htmlContent =  `
-    <h2>Email Verification</h2>
-    <p>Hi ${newUser.name},</p>
-    <p>Click the link below to verify your account:</p>
-    <a href="${verificationLink}">Verify Email</a>
-    <p>This link is valid for 24 hours.</p>
-  `;
-
-  await apiInstance.sendTransacEmail(sendSmtpEmail);
-
-  // Generate tokens
-  // const accessToken = jwt.sign({ userId: newUser._id }, JWT_SECRET, { expiresIn: ACCESS_TOKEN_EXPIRY });
-  // const refreshToken = jwt.sign({ userId: newUser._id }, JWT_REFRESH_SECRET, { expiresIn: `${REFRESH_TOKEN_EXPIRY_MS}ms` });
-
-  // // Save hashed refresh token
-  // const hashed = hashToken(refreshToken);
-  // const expiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_MS);
-  // await new RefreshToken({ userId: newUser._id, hashedToken: hashed, expiresAt }).save();
-
-  // Return tokens
-  return res.status(201).json({
-    message: "Registration successful! Verification email sent.",
-    user: {
-      id: newUser._id,
-      name: newUser.name,
-      email: newUser.email,
-      isVerified: false
+    if (!email || !password || !name) {
+      return res.status(400).json({ error: 'Missing required fields' });
     }
-  });
+
+    const existingUser = await User.findOne({ email: email.trim() }).session(session);
+    if (existingUser) {
+      await session.abortTransaction();
+      return res.status(409).json({ error: 'A user with that email already exists' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const newUser = new User({ 
+      email, 
+      name, 
+      hashedPassword, 
+      isVerified: false 
+    });
+    await newUser.save({ session });
+
+    // Generate token
+    const token = crypto.randomBytes(32).toString("hex");
+    const hashedToken = await bcrypt.hash(token, 10);
+
+    await EmailVerificationToken.create([{
+      userId: newUser._id,
+      token: hashedToken,
+      expiresAt: Date.now() + 24 * 60 * 60 * 1000
+    }], { session });
+
+    // Send email
+    const verificationLink = `${process.env.SERVER_URL}/api/auth/verify-email?token=${token}`;
+    
+    let apiInstance = new brevo.TransactionalEmailsApi();
+    apiInstance.setApiKey(brevo.TransactionalEmailsApiApiKeys.apiKey, BREVO_API_KEY);
+
+    let sendSmtpEmail = new brevo.SendSmtpEmail();
+    sendSmtpEmail.sender = { name: 'CodeKeeper', email: 'samuelfernandes009@gmail.com' };
+    sendSmtpEmail.to = [{ email: newUser.email, name: newUser.name }];
+    sendSmtpEmail.subject = 'Verify Your Email';
+    sendSmtpEmail.htmlContent = `
+      <h2>Email Verification</h2>
+      <p>Hi ${newUser.name},</p>
+      <p>Click the link below to verify your account:</p>
+      <a href="${verificationLink}">Verify Email</a>
+      <p>This link is valid for 24 hours.</p>
+    `;
+
+    try {
+      await apiInstance.sendTransacEmail(sendSmtpEmail);
+    } catch (emailError) {
+      console.error('Email sending failed:', emailError);
+      await session.abortTransaction();
+      return res.status(500).json({ 
+        error: 'Failed to send verification email. Please try again later.',
+        details: emailError.message 
+      });
+    }
+
+    // Commit transaction only if everything succeeded
+    await session.commitTransaction();
+
+    return res.status(201).json({
+      message: "Registration successful! Verification email sent.",
+      user: {
+        id: newUser._id,
+        name: newUser.name,
+        email: newUser.email,
+        isVerified: false
+      }
+    });
+
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('Registration error:', error);
+    return res.status(500).json({ 
+      error: 'Registration failed',
+      details: error.message 
+    });
+  } finally {
+    session.endSession();
+  }
 };
 
 
