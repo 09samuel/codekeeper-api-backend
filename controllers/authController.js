@@ -1,7 +1,7 @@
 require("dotenv").config(); 
 
 const { hashToken } = require("../utils/hashTokens");
-const { Resend } = require('resend');
+const brevo = require('@getbrevo/brevo');
 
 const RefreshToken = require("../models/RefreshToken");
 const User = require("../models/User");
@@ -18,7 +18,8 @@ const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
 const ACCESS_TOKEN_EXPIRY = process.env.ACCESS_TOKEN_EXPIRY || "15m";
 const REFRESH_TOKEN_EXPIRY_MS = parseInt(process.env.REFRESH_TOKEN_EXPIRY_MS) || 7 * 24 * 60 * 60 * 1000;
-const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const BREVO_API_KEY = process.env.BREVO_API_KEY;
+
 
 
 // connect to MongoDB
@@ -55,20 +56,23 @@ exports.register = async (req, res) => {
 
   const verificationLink = `${process.env.SERVER_URL}/api/auth/verify-email?token=${token}`;
 
-  const resend = new Resend(RESEND_API_KEY);
+  let apiInstance = new brevo.TransactionalEmailsApi();
+  apiInstance.setApiKey(brevo.TransactionalEmailsApiApiKeys.apiKey, BREVO_API_KEY);
 
-  resend.emails.send({
-  from: 'CodeKeeper <onboarding@resend.dev>',
-  to: newUser.email,
-  subject: 'Verify Your Email',
-   html: `
+  let sendSmtpEmail = new brevo.SendSmtpEmail();
+  
+  sendSmtpEmail.sender = { name: 'CodeKeeper', email: 'noreply@codekeeper.com' };
+  sendSmtpEmail.to = [{ email: newUser.email, name: newUser.name }];
+  sendSmtpEmail.subject = 'Verify Your Email';
+  sendSmtpEmail.htmlContent =  `
     <h2>Email Verification</h2>
     <p>Hi ${newUser.name},</p>
     <p>Click the link below to verify your account:</p>
     <a href="${verificationLink}">Verify Email</a>
     <p>This link is valid for 24 hours.</p>
-  `
-});
+  `;
+
+  await apiInstance.sendTransacEmail(sendSmtpEmail);
 
   // Generate tokens
   // const accessToken = jwt.sign({ userId: newUser._id }, JWT_SECRET, { expiresIn: ACCESS_TOKEN_EXPIRY });

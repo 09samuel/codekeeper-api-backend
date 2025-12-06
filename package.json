@@ -12,6 +12,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@getbrevo/brevo": "^3.0.1",
     "aws-sdk": "^2.1692.0",
     "axios": "^1.13.2",
     "bcrypt": "^6.0.0",
@@ -22,8 +23,7 @@
     "jsonwebtoken": "^9.0.2",
     "mime-types": "^3.0.2",
     "mongoose": "^8.19.1",
-    "nodemailer": "^7.0.11",
-    "resend": "^6.5.2"
+    "nodemailer": "^7.0.11"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"
