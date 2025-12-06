@@ -60,8 +60,8 @@ exports.register = async (req, res) => {
   apiInstance.setApiKey(brevo.TransactionalEmailsApiApiKeys.apiKey, BREVO_API_KEY);
 
   let sendSmtpEmail = new brevo.SendSmtpEmail();
-  
-  sendSmtpEmail.sender = { name: 'CodeKeeper', email: 'noreply@codekeeper.com' };
+
+  sendSmtpEmail.sender = { name: 'CodeKeeper', email: 'samuelfernandes009@gmail.com' };
   sendSmtpEmail.to = [{ email: newUser.email, name: newUser.name }];
   sendSmtpEmail.subject = 'Verify Your Email';
   sendSmtpEmail.htmlContent =  `
