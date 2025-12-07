@@ -1,4 +1,5 @@
 const Document = require("../models/Document");
+const User = require("../models/User");
 const s3Service = require("../services/s3Service");
 const path = require('path');
 
