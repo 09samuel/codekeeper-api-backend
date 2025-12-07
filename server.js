@@ -7,6 +7,7 @@ const documentRoutes = require("./routes/documentRoutes");
 const collaboratorRoutes = require("./routes/collaboratorRoutes");
 const aiRoutes = require("./routes/aiRoutes");
 const codeRoutes = require("./routes/codeRoutes");
+const pingRoutes = require("./routes/pingRoutes");
 require("./config/db");
 
 const app = express();
@@ -19,6 +20,7 @@ app.use("/api/documents", documentRoutes);
 app.use("/api/collaborators", collaboratorRoutes);
 app.use("/api/ai", aiRoutes);
 app.use("/api/code", codeRoutes);
+app.use("/api/ping", pingRoutes);
 
 // 404 handler
 app.use((req, res) => res.status(404).json({ error: "Route not found" }));
