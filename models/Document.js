@@ -7,6 +7,7 @@ const documentSchema = new mongoose.Schema({
   parentFolder: { type: mongoose.Schema.Types.ObjectId, ref: 'Document', default: null },
   contentUrl: { type: String }, // S3 URL for file content
   s3Key: { type: String }, // S3 object key
+  contentSize: { type: Number, default: 0 }, // Size of the content in bytes
   
   // Collaborators with permissions
   collaborators: [{

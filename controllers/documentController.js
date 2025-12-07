@@ -16,6 +16,32 @@ exports.createDocument = async (req, res) => {
     // Validate type
     const docType = type || 'file';
 
+    // Check storage limits for files
+    if (docType === 'file') {
+      const contentSize = Buffer.byteLength(content || '', 'utf8');
+      
+      // Get fresh user data with storage info
+      const userWithStorage = await User.findById(user._id);
+      if (!userWithStorage) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      const storageLimit = userWithStorage.storageLimit || (100 * 1024 * 1024); 
+      const storageUsed = userWithStorage.storageUsed || 0;
+
+      if (storageUsed + contentSize > storageLimit) {
+        return res.status(413).json({ 
+          error: 'Storage limit exceeded',
+          used: storageUsed,
+          limit: storageLimit,
+          required: contentSize,
+          usedMB: (storageUsed / (1024 * 1024)).toFixed(2),
+          limitMB: (storageLimit / (1024 * 1024)).toFixed(2),
+          requiredMB: (contentSize / (1024 * 1024)).toFixed(2)
+        });
+      }
+    }
+
     let inheritedCollaborators = [];
     if (docType === 'file' && parentFolderId) {
       const parentFolder = await Document.findById(parentFolderId);
@@ -42,7 +68,8 @@ exports.createDocument = async (req, res) => {
       type: docType,
       parentFolder: parentFolderId || null,
       collaborators: inheritedCollaborators,
-      lastModifiedBy: user._id
+      lastModifiedBy: user._id,
+      contentSize: docType === 'file' ? Buffer.byteLength(content || '', 'utf8') : 0 
     });
 
     // In your createDocument endpoint
@@ -65,6 +92,11 @@ exports.createDocument = async (req, res) => {
         saved.contentUrl = contentUrl;
         saved.s3Key = s3Key;
         await saved.save();
+
+        // Update user's storageUsed
+        await User.findByIdAndUpdate(user._id, {
+          $inc: { storageUsed: saved.contentSize }
+        });
 
         console.log(`[API] ✓ File ${saved._id} created at ${s3Key}`);
 
@@ -89,7 +121,6 @@ exports.createDocument = async (req, res) => {
         });
       }
     }
-
   } catch (err) {
     console.error('[API] Error creating document:', err);
     res.status(500).json({ error: err.message });
@@ -264,6 +295,33 @@ exports.saveDocumentContent = async (req, res) => {
       return res.status(404).json({ error: "Document not found" });
     }
 
+    // Check if user has enough space to save updated content
+    const oldSize = doc.contentSize || 0;
+    const newSize = Buffer.byteLength(content, 'utf8');
+    const sizeDiff = newSize - oldSize;
+
+    // If size increased, check quota
+    if (sizeDiff > 0) {
+      const user = await User.findById(doc.owner);
+      if (!user) {
+        return res.status(404).json({ error: 'Document owner not found' });
+      }
+
+      const storageLimit = user.storageLimit || (100 * 1024 * 1024);
+      const storageUsed = user.storageUsed || 0;
+
+      if (storageUsed + sizeDiff > storageLimit) {
+        return res.status(413).json({ 
+          error: 'Storage limit exceeded',
+          used: storageUsed,
+          limit: storageLimit,
+          required: sizeDiff,
+          usedMB: (storageUsed / (1024 * 1024)).toFixed(2),
+          limitMB: (storageLimit / (1024 * 1024)).toFixed(2)
+        });
+      }
+    }
+
     // Extract extension from title, default to .txt if none
     let extension = path.extname(doc.title);
       
@@ -284,6 +342,15 @@ exports.saveDocumentContent = async (req, res) => {
       doc.lastModified = new Date();
       doc.lastModifiedBy = req.user?._id;
       await doc.save();
+
+
+      if (sizeDiff !== 0) {
+        await User.findByIdAndUpdate(doc.owner, {
+          $inc: { storageUsed: sizeDiff }
+        });
+        console.log(`[API] Updated storage for user ${doc.owner}: ${sizeDiff > 0 ? '+' : ''}${sizeDiff} bytes`);
+      }
+
       
       console.log(`[API] ✓ Document ${documentId} saved to S3 at ${s3Key}`);
       res.json({ success: true, message: 'Document saved to S3' });
@@ -407,12 +474,14 @@ exports.deleteItem = async (req, res) => {
     const parentFolderId = doc.parentFolder;
     const docTitle = doc.title;
     const docType = doc.type;
+    let totalStorageReclaimed = 0;  
 
     // Delete S3 file if needed
     if (doc.s3Key && doc.type === 'file') {
       try {
         await s3Service.deleteFile(doc.s3Key);
         console.log(`[API] ✓ Deleted S3 file: ${doc.s3Key}`);
+        totalStorageReclaimed += (doc.contentSize || 0);
       } catch (s3Error) {
         console.error('[API] Error deleting from S3:', s3Error);
       }
@@ -421,12 +490,20 @@ exports.deleteItem = async (req, res) => {
     // Delete folder contents
     if (doc.type === 'folder') {
       console.log(`[API] Deleting folder contents for: ${id}`);
-      await deleteFolder(doc._id, user._id);
+      const folderStorageReclaimed = await deleteFolder(doc._id, user._id);
+      totalStorageReclaimed += folderStorageReclaimed;
     }
 
     // Delete doc from DB
     await Document.deleteOne({ _id: id });
     console.log(`[API] ✓ Document ${id} deleted from database`);
+
+    if (totalStorageReclaimed > 0) {
+      await User.findByIdAndUpdate(user._id, {
+        $inc: { storageUsed: -totalStorageReclaimed }
+      });
+      console.log(`[API] Reclaimed ${totalStorageReclaimed} bytes for user ${user._id}`);
+    }
 
     // Notify collaborators using fallback doc (because DB entry is gone)
     try {
@@ -482,17 +559,21 @@ exports.checkOwnership = async (req, res) => {
 
 // Helper function to recursively delete folder and its contents
 async function deleteFolder(folderId, userId) {
+  let totalStorageReclaimed = 0;
+
   // Find all documents in this folder
   const children = await Document.find({ parentFolder: folderId });
 
   for (const child of children) {
     if (child.type === 'folder') {
-      // Recursively delete subfolder
-      await deleteFolder(child._id, userId);
+      // Recursively delete subfolder and accumulate storage
+      const subfolderStorage = await deleteFolder(child._id, userId);
+      totalStorageReclaimed += subfolderStorage;
     } else if (child.s3Key) {
-      // Delete file from S3
+      // Delete file from S3 and track storage
       try {
         await s3Service.deleteFile(child.s3Key);
+        totalStorageReclaimed += (child.contentSize || 0);
       } catch (err) {
         console.error(`[API] Error deleting S3 file ${child.s3Key}:`, err);
       }
@@ -500,6 +581,8 @@ async function deleteFolder(folderId, userId) {
     // Delete child from DB
     await Document.deleteOne({ _id: child._id });
   }
+
+  return totalStorageReclaimed; // Return total bytes reclaimed
 }
 
 async function notifyCollaborators(documentId, eventType, payload, fallbackDoc = null) {
