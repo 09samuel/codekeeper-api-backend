@@ -13,7 +13,7 @@ jobs:
     steps:
       - name: Ping the service
         run: |
-          response=$(curl -s -o /dev/null -w "%{http_code}" ${{ secrets.SERVICE_URL }}/api/ping)
+          response=$(curl -s -o /dev/null -w "%{http_code}" ${{ secrets.SERVICE_URL }}/api/ping/ping)
           echo "Response status: $response"
           if [ $response -eq 200 ]; then
             echo "✅ Service is alive"
