@@ -20,7 +20,7 @@ exports.getCollaborators = async (req, res) => {
     // Check if user has access to this document
     const hasAccess = document.owner._id.toString() === req.user.id ||
       document.collaborators.some(collab => collab.user._id.toString() === req.user.id);
-
+      
     if (!hasAccess) {
       return res.status(403).json({ error: 'Access denied' });
     }
@@ -56,12 +56,10 @@ exports.addCollaborator = async (req, res) => {
     const document = await Document.findById(documentId);
     if (!document) return res.status(404).json({ error: 'Document not found' });
 
-    // Check ownership
     if (document.owner.toString() !== req.user.id) {
       return res.status(403).json({ error: 'Only the owner can add collaborators' });
     }
 
-    // Find user to add
     const userToAdd = await User.findOne({ email });
     if (!userToAdd) return res.status(404).json({ error: 'User not found' });
 
@@ -69,7 +67,6 @@ exports.addCollaborator = async (req, res) => {
       return res.status(400).json({ error: 'Cannot add yourself as collaborator' });
     }
 
-    // Helper: add collaborator to a document if not already present
     const addIfNotExists = (doc) => {
       const exists = doc.collaborators.some(
         (c) => c.user.toString() === userToAdd._id.toString()
@@ -85,33 +82,34 @@ exports.addCollaborator = async (req, res) => {
       return true;
     };
 
+    // Track affected documents
+    const affectedDocumentIds = [];
     let added = false;
 
     if (document.type === 'folder') {
+      if (addIfNotExists(document)) {
+        added = true;
+        affectedDocumentIds.push(document._id.toString());
+      }
 
-      // Attempt to add to the folder itself
-      if (addIfNotExists(document)) added = true;
-
-      // Add to nested files
       const allFiles = await getAllFilesInFolder(documentId);
       for (const file of allFiles) {
         if (addIfNotExists(file)) {
           added = true;
+          affectedDocumentIds.push(file._id.toString());
           await file.save();
         }
       }
 
       await document.save();
-
     } else {
-      // File case
       if (addIfNotExists(document)) {
         added = true;
+        affectedDocumentIds.push(document._id.toString());
         await document.save();
       }
     }
 
-    // Re-fetch collaborator data populated
     await document.populate('collaborators.user', 'name email');
 
     const newCollaborator = document.collaborators.find(
@@ -119,9 +117,12 @@ exports.addCollaborator = async (req, res) => {
     );
 
     if (added) {
-      try {
-        await axios.post(WS_CONTROL_URL, {
-          docId: documentId,
+      console.log(`📢 Sending WS add notifications for ${affectedDocumentIds.length} documents`);
+      
+      // Send notification for each affected document
+      const notifications = affectedDocumentIds.map(docId =>
+        axios.post(WS_CONTROL_URL, {
+          docId: docId,
           type: 'collaborator-added',
           payload: {
             _id: newCollaborator.user._id,
@@ -130,10 +131,10 @@ exports.addCollaborator = async (req, res) => {
             permission: newCollaborator.permission,
             addedAt: newCollaborator.addedAt,
           }
-        });
-      } catch (e) {
-        console.error('Error adding collaborator');
-      }
+        }).catch(e => console.error(`Error notifying for doc ${docId}:`, e.message))
+      );
+
+      await Promise.all(notifications);
 
       return res.json({
         _id: newCollaborator.user._id,
@@ -144,15 +145,16 @@ exports.addCollaborator = async (req, res) => {
       });
     }
 
-    // collaborator already existed. no return data
     return res.status(204).send();
-
 
   } catch (error) {
     console.error('Error adding collaborator:', error);
     res.status(500).json({ error: error.message });
   }
 };
+
+
+
 
 // Recursive helper: find all files inside a folder
 async function getAllFilesInFolder(folderId) {
@@ -198,64 +200,79 @@ exports.updateCollaborator = async (req, res) => {
         collaborator.permission = permission;
         doc.lastModified = new Date();
         doc.lastModifiedBy = req.user.id;
+        return true; // Return true if updated
       }
+      return false;
     };
 
+    // Track all document IDs that were updated
+    const updatedDocumentIds = [];
+
     if (document.type === 'folder') {
-      updatePermissionIfExists(document);
+      if (updatePermissionIfExists(document)) {
+        updatedDocumentIds.push(document._id.toString());
+      }
+      
       const allFiles = await getAllFilesInFolder(document._id);
 
       await Promise.all(allFiles.map(async (file) => {
         if (file.owner.toString() === document.owner.toString()) {
-          updatePermissionIfExists(file);
+          if (updatePermissionIfExists(file)) {
+            updatedDocumentIds.push(file._id.toString());
+          }
           await file.save();
         }
       }));
 
       await document.save();
     } else {
-      updatePermissionIfExists(document);
+      if (updatePermissionIfExists(document)) {
+        updatedDocumentIds.push(document._id.toString());
+      }
       await document.save();
     }
 
-    console.log('🔄 Notifying WS server:', { docId: id, collaboratorId, permission });
-    console.log('📡 WS_CONTROL_URL:', WS_CONTROL_URL);
+    console.log(`📢 Sending WS notifications for ${updatedDocumentIds.length} documents`);
 
-    try {
-      const response = await axios.post(
+    // Send WS event for EACH updated document
+    const notifications = updatedDocumentIds.map(docId => 
+      axios.post(
         WS_CONTROL_URL,
         {
-          docId: id,                  // Document ID
+          docId: docId,                  // Each individual document
           type: 'collaborator-permission-updated',
           payload: {
-            _id: collaboratorId,      // User ID
-            permission: permission,   // New permission ('view' or 'edit')
-            documentId: id            // Document ID for WS routing
+            _id: collaboratorId,
+            permission: permission,
+            documentId: docId
           }
         },
         {
-          timeout: 5000, // 5 second timeout
+          timeout: 5000,
           headers: { 'Content-Type': 'application/json' }
         }
-      );
+      ).catch(error => {
+        console.error(`❌ WS notification failed for doc ${docId}:`, error.message);
+      })
+    );
 
-      console.log('✅ WS notification SUCCESS (permission):', response.status, response.data);
-    } catch (error) {
-      console.error('❌ WS notification FAILED (permission):', {
-        message: error.message,
-        code: error.code,
-        status: error.response?.status,
-        data: error.response?.data,
-        url: WS_CONTROL_URL
-      });
-    }
+    // Wait for all notifications to complete
+    await Promise.all(notifications);
+    
+    console.log(`✅ Sent ${updatedDocumentIds.length} WS permission notifications`);
 
-    res.json({ message: 'Permission updated successfully' });
+    res.json({ 
+      message: 'Permission updated successfully',
+      updatedCount: updatedDocumentIds.length 
+    });
   } catch (error) {
     console.error('Error updating collaborator:', error);
     res.status(500).json({ error: error.message });
   }
 };
+
+
+
 
 // Remove collaborator
 exports.removeCollaborator = async (req, res) => {
