@@ -31,4 +31,22 @@ documentSchema.index({ owner: 1 });
 documentSchema.index({ 'collaborators.user': 1 });
 documentSchema.index({ parentFolder: 1 });
 
+// Unique constraint for files/folders with NON-NULL parent
+documentSchema.index(
+  { title: 1, parentFolder: 1, owner: 1, type: 1 },
+  { 
+    unique: true,
+    partialFilterExpression: { parentFolder: { $ne: null } }
+  }
+);
+
+// Separate unique constraint for ROOT level (parentFolder = null)
+documentSchema.index(
+  { title: 1, owner: 1, type: 1 },
+  { 
+    unique: true,
+    partialFilterExpression: { parentFolder: null }
+  }
+);
+
 module.exports = mongoose.model('Document', documentSchema);
