@@ -171,9 +171,6 @@ exports.createFolder = async (req, res) => {
 
 
 
-
-
-
 exports.getUserDocuments = async (req, res) => {
   try {
     const user = req.user;
@@ -181,23 +178,77 @@ exports.getUserDocuments = async (req, res) => {
 
     console.log(`[API] getUserDocuments called by user ${user._id} for folder ${folderId || 'root'}`);
     
-    const query = {
-      $or: [
-        { owner: user._id },
-        { 'collaborators.user': user._id }
-      ],
-      parentFolder: folderId || null
-    };
+    let query;
+    
+    if (!folderId) {
+      // Find all folders shared with user
+      const sharedFolders = await Document.find({
+        type: 'folder',
+        'collaborators.user': user._id
+      }).select('_id');
+      
+      const sharedFolderIds = sharedFolders.map(f => f._id);
+      
+      console.log(`[API] User has ${sharedFolderIds.length} directly shared folders`);
+
+      // Get all descendant folder IDs (recursively)
+      const allSharedFolderIds = await getAllDescendantFolders(sharedFolderIds);
+      
+      console.log(`[API] Total folders in shared hierarchy: ${allSharedFolderIds.length}`);
+
+      // At root, show:
+      // - My own files at root
+      // - Shared files NOT inside any shared folder
+      // - Shared folders themselves
+      query = {
+        $or: [
+          // My files at root
+          { owner: user._id, parentFolder: null },
+          
+          // Shared files NOT in a shared folder hierarchy
+          { 
+            'collaborators.user': user._id,
+            parentFolder: { $nin: allSharedFolderIds }  // ✅ Exclude if parent is shared
+          }
+        ]
+      };
+      
+      console.log('[API] ROOT: Showing owned + shared items (excluding files in shared folders)');
+    } else {
+      // Inside a folder - same logic as before
+      const sharedFolders = await Document.find({
+        type: 'folder',
+        'collaborators.user': user._id
+      }).select('_id parentFolder');
+      
+      const sharedFolderIds = sharedFolders.map(f => f._id);
+      const canSeeAllInFolder = await hasAccessToFolder(folderId, user._id, sharedFolderIds);
+      
+      if (canSeeAllInFolder) {
+        query = { parentFolder: folderId };
+        console.log('[API] Showing all documents in shared folder');
+      } else {
+        query = {
+          $or: [
+            { owner: user._id },
+            { 'collaborators.user': user._id }
+          ],
+          parentFolder: folderId
+        };
+        console.log('[API] Showing only owned/directly shared documents');
+      }
+    }
     
     const documents = await Document.find(query)
       .populate('owner', 'name email')
       .populate('collaborators.user', 'name email')
       .sort({ type: -1, title: 1 });
     
+    console.log(`[API] Found ${documents.length} documents`);
+
     const documentsWithPermissions = documents
       .map(doc => {
         try {
-          // Skip if owner is null
           if (!doc.owner || !doc.owner._id) {
             console.warn(`Document ${doc._id} has null owner, skipping`);
             return null;
@@ -205,7 +256,6 @@ exports.getUserDocuments = async (req, res) => {
           
           const isOwner = doc.owner._id.equals(user._id);
           
-          // Safely find collaborator
           const collaborator = doc.collaborators?.find(c => 
             c.user && c.user._id && c.user._id.equals(user._id)
           );
@@ -221,7 +271,7 @@ exports.getUserDocuments = async (req, res) => {
           return null;
         }
       })
-      .filter(doc => doc !== null); // Remove null entries
+      .filter(doc => doc !== null);
     
     res.json(documentsWithPermissions);
   } catch (err) {
@@ -230,6 +280,66 @@ exports.getUserDocuments = async (req, res) => {
   }
 };
 
+//  Recursively get all descendant folders
+async function getAllDescendantFolders(folderIds) {
+  if (!folderIds || folderIds.length === 0) return [];
+  
+  const allFolderIds = [...folderIds];
+  const processed = new Set(folderIds.map(id => id.toString()));
+  const queue = [...folderIds];
+  
+  while (queue.length > 0) {
+    const currentId = queue.shift();
+    
+    // Find all child folders
+    const children = await Document.find({
+      type: 'folder',
+      parentFolder: currentId
+    }).select('_id');
+    
+    for (const child of children) {
+      const childIdStr = child._id.toString();
+      if (!processed.has(childIdStr)) {
+        processed.add(childIdStr);
+        allFolderIds.push(child._id);
+        queue.push(child._id);
+      }
+    }
+  }
+  
+  return allFolderIds;
+}
+
+async function hasAccessToFolder(folderId, userId, sharedFolderIds) {
+  if (sharedFolderIds.some(id => id.equals(folderId))) {
+    return true;
+  }
+
+  let currentFolderId = folderId;
+  let depth = 0;
+  const maxDepth = 20;
+
+  while (currentFolderId && depth < maxDepth) {
+    const folder = await Document.findById(currentFolderId)
+      .select('parentFolder collaborators');
+    
+    if (!folder) break;
+
+    const isCollaborator = folder.collaborators?.some(c => 
+      c.user && c.user.equals(userId)
+    );
+
+    if (isCollaborator) {
+      console.log(`[API] Found access through ancestor folder: ${currentFolderId}`);
+      return true;
+    }
+
+    currentFolderId = folder.parentFolder;
+    depth++;
+  }
+
+  return false;
+}
 
 
 exports.getDocumentById = async (req, res) => {
