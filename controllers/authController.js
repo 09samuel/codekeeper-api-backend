@@ -6,6 +6,7 @@ const brevo = require('@getbrevo/brevo');
 const RefreshToken = require("../models/RefreshToken");
 const User = require("../models/User");
 const EmailVerificationToken = require('../models/EmailVerificationToken');
+const PasswordResetToken = require('../models/PasswordResetToken');
 
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
@@ -254,5 +255,154 @@ exports.logout = async (req, res) => {
   } catch (err) {
     console.error("Logout error:", err);
     res.status(500).send("Server error during logout.");
+  }
+};
+
+
+
+// Forgot Password - Request reset link
+exports.forgotPassword = async (req, res) => {
+  const { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ error: 'Email is required' });
+  }
+
+  try {
+    const user = await User.findOne({ email: email.trim() });
+    
+    // For security, don't reveal if email exists
+    if (!user) {
+      return res.status(200).json({ 
+        message: 'If that email exists, a password reset link has been sent.' 
+      });
+    }
+
+    // Delete any existing reset tokens for this user
+    await PasswordResetToken.deleteMany({ userId: user._id });
+
+    // Generate secure random token
+    const resetToken = crypto.randomBytes(32).toString("hex");
+    const hashedToken = await bcrypt.hash(resetToken, 10);
+
+    // Save token with 1 hour expiry
+    await PasswordResetToken.create({
+      userId: user._id,
+      token: hashedToken,
+      expiresAt: Date.now() + 60 * 60 * 1000 // 1 hour
+    });
+
+    // Send reset email via Brevo
+    const resetLink = `${process.env.CLIENT_URL}/reset-password?token=${resetToken}`;
+    
+    let apiInstance = new brevo.TransactionalEmailsApi();
+    apiInstance.setApiKey(brevo.TransactionalEmailsApiApiKeys.apiKey, BREVO_API_KEY);
+
+    let sendSmtpEmail = new brevo.SendSmtpEmail();
+    sendSmtpEmail.sender = { name: 'CodeKeeper', email: 'samuelfernandes009@gmail.com' };
+    sendSmtpEmail.to = [{ email: user.email, name: user.name }];
+    sendSmtpEmail.subject = 'Reset Your Password';
+    sendSmtpEmail.htmlContent = `
+      <h2>Password Reset Request</h2>
+      <p>Hi ${user.name},</p>
+      <p>You requested to reset your password. Click the link below to proceed:</p>
+      <a href="${resetLink}">Reset Password</a>
+      <p>This link is valid for 1 hour.</p>
+      <p>If you didn't request this, please ignore this email.</p>
+    `;
+
+    try {
+      await apiInstance.sendTransacEmail(sendSmtpEmail);
+    } catch (emailError) {
+      console.error('Password reset email failed:', emailError);
+      await PasswordResetToken.deleteOne({ userId: user._id });
+      return res.status(500).json({ 
+        error: 'Failed to send reset email. Please try again later.' 
+      });
+    }
+
+    return res.status(200).json({
+      message: 'If that email exists, a password reset link has been sent.'
+    });
+
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    return res.status(500).json({ 
+      error: 'Server error. Please try again later.' 
+    });
+  }
+};
+
+
+exports.resetPassword = async (req, res) => {
+  const { token, newPassword } = req.body;
+
+  if (!token || !newPassword) {
+    return res.status(400).json({ error: 'Token and new password are required' });
+  }
+
+  if (newPassword.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  }
+
+  try {
+    // Find valid token by comparing hashed version
+    const records = await PasswordResetToken.find();
+
+    let validRecord = null;
+    for (const record of records) {
+      const isMatch = await bcrypt.compare(token, record.token);
+      if (isMatch) {
+        validRecord = record;
+        break;
+      }
+    }
+
+    if (!validRecord) {
+      return res.status(400).json({ error: 'Invalid or expired reset token' });
+    }
+
+    if (validRecord.expiresAt < Date.now()) {
+      await PasswordResetToken.deleteOne({ _id: validRecord._id });
+      return res.status(400).json({ error: 'Reset token has expired' });
+    }
+
+    // Get user's current password
+    const user = await User.findById(validRecord.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Check if new password is same as old password
+    const isSamePassword = await bcrypt.compare(newPassword, user.hashedPassword);
+    if (isSamePassword) {
+      return res.status(400).json({ 
+        error: 'New password cannot be the same as your current password' 
+      });
+    }
+
+    // Hash new password
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    // Update user password
+    await User.findByIdAndUpdate(validRecord.userId, { 
+      hashedPassword 
+    });
+
+    // Delete used token (one-time use)
+    await PasswordResetToken.deleteOne({ _id: validRecord._id });
+
+    // Invalidate all refresh tokens for security
+    await RefreshToken.deleteMany({ userId: validRecord.userId });
+
+    return res.status(200).json({ 
+      message: 'Password reset successful. Please log in with your new password.' 
+    });
+
+  } catch (error) {
+    console.error('Reset password error:', error);
+    return res.status(500).json({ 
+      error: 'Failed to reset password. Please try again.' 
+    });
   }
 };
