@@ -31,6 +31,7 @@ mongoose.connect(MONGODB_URI, {
 
 
 //register
+//register
 exports.register = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -38,8 +39,29 @@ exports.register = async (req, res) => {
   try {
     const { email, password, name } = req.body;
 
+    // Validate required fields
     if (!email || !password || !name) {
-      return res.status(400).json({ error: 'Missing required fields' });
+      await session.abortTransaction();
+      return res.status(400).json({ error: 'All fields are required' });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      await session.abortTransaction();
+      return res.status(400).json({ error: 'Please provide a valid email address' });
+    }
+
+    // Validate name length
+    if (name.trim().length < 2) {
+      await session.abortTransaction();
+      return res.status(400).json({ error: 'Name must be at least 2 characters long' });
+    }
+
+    // Validate password length
+    if (password.length < 8) {
+      await session.abortTransaction();
+      return res.status(400).json({ error: 'Password must be at least 8 characters long' });
     }
 
     const existingUser = await User.findOne({ email: email.trim() }).session(session);
@@ -92,8 +114,7 @@ exports.register = async (req, res) => {
       console.error('Email sending failed:', emailError);
       await session.abortTransaction();
       return res.status(500).json({ 
-        error: 'Failed to send verification email. Please try again later.',
-        details: emailError.message 
+        error: 'Failed to send verification email. Please try again later.'
       });
     }
 
@@ -114,8 +135,7 @@ exports.register = async (req, res) => {
     await session.abortTransaction();
     console.error('Registration error:', error);
     return res.status(500).json({ 
-      error: 'Registration failed',
-      details: error.message 
+      error: 'Registration failed. Please try again later.'
     });
   } finally {
     session.endSession();
@@ -154,6 +174,21 @@ exports.verifyEmail = async (req, res) => {
 exports.login = async (req, res) => {
   console.log("Login request body:", req.body);
   const { email, password } = req.body;
+
+  // validation for missing fields
+  if (!email || !password) {
+    return res.status(400).json({ 
+      message: "Email and password are required" 
+    });
+  }
+
+  // email format validation
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return res.status(400).json({ 
+      message: "Please provide a valid email address" 
+    });
+  }
   
   try {
     const user = await User.findOne({ email });
